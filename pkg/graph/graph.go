@@ -93,9 +93,10 @@ type Graph struct {
 
 	clientset *kubernetes.Clientset
 
-	coreV1       *CoreV1Graph
-	networkingV1 *NetworkingV1Graph
-	routeV1      *RouteV1Graph
+	coreV1              *CoreV1Graph
+	networkingV1        *NetworkingV1Graph
+	routeV1             *RouteV1Graph
+	applicationV1alpha1 *ApplicationV1alpha1Graph
 }
 
 // Node represents a node in the graph.
@@ -174,6 +175,7 @@ func NewGraph(clientset *kubernetes.Clientset, objs []*unstructured.Unstructured
 	g.coreV1 = NewCoreV1Graph(g)
 	g.networkingV1 = NewNetworkingV1Graph(g)
 	g.routeV1 = NewRouteV1Graph(g)
+	g.applicationV1alpha1 = NewApplicationV1alpha1Graph(g)
 
 	errs := []error{}
 
@@ -202,6 +204,8 @@ func (g *Graph) Unstructured(unstr *unstructured.Unstructured) (*Node, error) {
 		return g.NetworkingV1().Unstructured(unstr)
 	case "route.openshift.io/v1":
 		return g.RouteV1().Unstructured(unstr)
+	case "argoproj.io/v1alpha1":
+		return g.ApplicationV1alpha1().Unstructured(unstr)
 	default:
 		return g.Node(unstr.GroupVersionKind(), unstr), nil
 	}

@@ -1,7 +1,8 @@
 module github.com/steveteuber/kubectl-graph
 
-go 1.21
-toolchain go1.22.5
+go 1.22.0
+
+toolchain go1.22.6
 
 require (
 	github.com/openshift/api v3.9.0+incompatible
