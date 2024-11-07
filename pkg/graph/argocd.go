@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
+	set "github.com/hashicorp/go-set/v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -66,34 +67,76 @@ func (g *ApplicationV1alpha1Graph) Application(app *unstructured.Unstructured) (
 	projName := fields["spec"].(map[string]interface{})["project"].(string)
 
 	objs, err := g.getAllObjects()
+	children := set.New[*unstructured.Unstructured](len(objs))
 	if err != nil {
-		return n, err
+		return nil, err
 	}
+	namespaces := set.New[string](10)
+	// Track the immediate children, and AppProject of the Application
 	for _, obj := range objs {
 		if obj.GetKind() == "AppProject" && obj.GetAPIVersion() == "argoproj.io/v1alpha1" {
 			if obj.GetName() == projName {
-				g.graph.Relationship(n, obj.GetKind(), g.graph.Node(obj.GroupVersionKind(), obj))
+				childNode, err := g.graph.Unstructured(obj)
+				if err != nil {
+					return n, err
+				}
+				g.graph.Relationship(n, obj.GetKind(), childNode)
 			}
 		}
 		annotations := obj.GetAnnotations()
 		if trackingID, ok := annotations["argocd.argoproj.io/tracking-id"]; ok {
 			if strings.HasPrefix(trackingID, fmt.Sprintf("%s:", app.GetName())) {
-				g.graph.Relationship(n, obj.GetKind(), g.graph.Node(obj.GroupVersionKind(), obj))
+				children.Insert(obj)
+				if len(obj.GetNamespace()) > 0 {
+					namespaces.Insert(obj.GetNamespace())
+				}
 			}
 		}
 		labels := obj.GetLabels()
 		if trackingLabel, ok := labels["app.kubernetes.io/instance"]; ok {
 			if trackingLabel == app.GetName() {
-				g.graph.Relationship(n, obj.GetKind(), g.graph.Node(obj.GroupVersionKind(), obj))
+				children.Insert(obj)
+				if len(obj.GetNamespace()) > 0 {
+					namespaces.Insert(obj.GetNamespace())
+				}
 			}
 		}
+	}
+	// Add objects that are created in the same namespace of the immediate children
+	for _, obj := range objs {
+		if namespaces.Contains(obj.GetNamespace()) {
+			children.Insert(obj)
+		}
+	}
+	for _, child := range children.Slice() {
+		childNode, err := g.graph.Unstructured(child)
+		if err != nil {
+			return n, err
+		}
+		g.graph.Relationship(n, child.GetKind(), childNode)
 	}
 	return n, nil
 }
 
 // ApplicationSet adds a v1alpha1.ApplicationSet resource to the Graph.
 func (g *ApplicationV1alpha1Graph) ApplicationSet(appset *unstructured.Unstructured) (*Node, error) {
+	objs, err := g.getChildApplications()
+	if err != nil {
+		return nil, err
+	}
 	n := g.graph.Node(appset.GroupVersionKind(), appset)
+	for _, obj := range objs {
+		ownerReferences := obj.GetOwnerReferences()
+		for _, ownerRef := range ownerReferences {
+			if ownerRef.UID == appset.GetUID() {
+				childNode, err := g.graph.Unstructured(obj)
+				if err != nil {
+					return nil, err
+				}
+				g.graph.Relationship(n, obj.GetKind(), childNode)
+			}
+		}
+	}
 	return n, nil
 }
 
@@ -101,6 +144,23 @@ func (g *ApplicationV1alpha1Graph) ApplicationSet(appset *unstructured.Unstructu
 func (g *ApplicationV1alpha1Graph) AppProject(obj *unstructured.Unstructured) (*Node, error) {
 	n := g.graph.Node(obj.GroupVersionKind(), obj)
 	return n, nil
+}
+
+func (g *ApplicationV1alpha1Graph) getChildApplications() ([]*unstructured.Unstructured, error) {
+	results := make(map[string][]*unstructured.Unstructured)
+	objs := make([]*unstructured.Unstructured, 0)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	lock := sync.Mutex{}
+	err := g.getObjectsForAResource(schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}, results, &wg, &lock)
+	if err != nil {
+		return objs, err
+	}
+	wg.Wait()
+	for _, resourceObjs := range results {
+		objs = append(objs, resourceObjs...)
+	}
+	return objs, nil
 }
 
 func (g *ApplicationV1alpha1Graph) getAllObjects() ([]*unstructured.Unstructured, error) {
@@ -114,6 +174,9 @@ func (g *ApplicationV1alpha1Graph) getAllObjects() ([]*unstructured.Unstructured
 		results := make(map[string][]*unstructured.Unstructured, len(apiResource.APIResources))
 		lock := &sync.Mutex{}
 		for _, api := range apiResource.APIResources {
+			if api.Kind == "Event" {
+				continue
+			}
 			wg.Add(1)
 			gvk := schema.FromAPIVersionAndKind(apiResource.GroupVersion, apiResource.Kind)
 			gv := gvk.GroupVersion()
@@ -129,15 +192,14 @@ func (g *ApplicationV1alpha1Graph) getAllObjects() ([]*unstructured.Unstructured
 	return objs, nil
 }
 
-func (g *ApplicationV1alpha1Graph) getObjectsForAResource(gvr schema.GroupVersionResource, results map[string][]*unstructured.Unstructured, wg *sync.WaitGroup, lock *sync.Mutex) {
+func (g *ApplicationV1alpha1Graph) getObjectsForAResource(gvr schema.GroupVersionResource, results map[string][]*unstructured.Unstructured, wg *sync.WaitGroup, lock *sync.Mutex) error {
 	defer wg.Done()
 	defer lock.Unlock()
 	objList, err := dynamic.New(g.graph.clientset.RESTClient()).Resource(gvr).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		//fmt.Printf("ignoring error : could not find resources for gvr %v\n", gvr)
 		lock.Lock()
 		results[gvr.String()] = make([]*unstructured.Unstructured, 0)
-		return
+		return err
 	}
 	result := make([]*unstructured.Unstructured, 0, len(objList.Items))
 	for _, obj := range objList.Items {
@@ -145,5 +207,5 @@ func (g *ApplicationV1alpha1Graph) getObjectsForAResource(gvr schema.GroupVersio
 	}
 	lock.Lock()
 	results[gvr.String()] = result
-	return
+	return nil
 }
