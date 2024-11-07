@@ -103,9 +103,10 @@ func (g *ApplicationV1alpha1Graph) Application(app *unstructured.Unstructured) (
 		}
 	}
 	// Add objects that are created in the same namespace of the immediate children
+	nextLevelChildren := set.New[*unstructured.Unstructured](len(objs))
 	for _, obj := range objs {
 		if namespaces.Contains(obj.GetNamespace()) {
-			children.Insert(obj)
+			nextLevelChildren.Insert(obj)
 		}
 	}
 	for _, child := range children.Slice() {
@@ -114,6 +115,11 @@ func (g *ApplicationV1alpha1Graph) Application(app *unstructured.Unstructured) (
 			return n, err
 		}
 		g.graph.Relationship(n, child.GetKind(), childNode)
+	}
+
+	// Loop through the next level children and add them as nodes without any direct relationship to the application
+	for _, child := range nextLevelChildren.Slice() {
+		g.graph.Node(child.GroupVersionKind(), child)
 	}
 	return n, nil
 }
